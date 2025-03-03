@@ -35,13 +35,13 @@ class WallFollower(Node):
         self.add_on_set_parameters_callback(self.parameters_callback)
 
         # TODO: Initialize your publishers and subscribers here
-        self.simple_publisher = self.create_publisher(AckermannDriveStamped, 'drive', 10)
+        self.simple_publisher = self.create_publisher(AckermannDriveStamped, self.DRIVE_TOPIC, 10)
         self.line = self.create_publisher(Marker, "wall", 10)
         timer_period = 1
         self.i =0
         self.subscription = self.create_subscription(
             LaserScan,
-            'scan',
+            self.SCAN_TOPIC,
             self.listener_callback,
             10)
         self.angle = 0.0
@@ -55,9 +55,9 @@ class WallFollower(Node):
         self.get_logger().info('Wall Distance: "%s"' % self.distance)
 
     def listener_callback(self, msg):
-        self.get_logger().info("Message got")
+        # self.get_logger().info("Message got")
         self.angle, self.distance = self.leastsq_wall(self.scan_slice_cartesian(msg))
-        self.angle += self.SIDE * (self.distance - self.DESIRED_DISTANCE)/self.DESIRED_DISTANCE * np.pi/4
+        self.angle += self.SIDE * (self.distance - self.DESIRED_DISTANCE)/self.DESIRED_DISTANCE * 1.5
 
         driveCommand = AckermannDriveStamped()
         driveCommand.header.frame_id = "base_link"
@@ -72,10 +72,10 @@ class WallFollower(Node):
     def scan_slice_cartesian(self, subscription):
         if self.SIDE == -1:
             lowerBound = int((-subscription.angle_min-np.pi/2)/subscription.angle_increment)
-            upperBound = int((-subscription.angle_min-np.pi/6)/subscription.angle_increment)
+            upperBound = int((-subscription.angle_min+np.pi/100)/subscription.angle_increment)
         else:
-            lowerBound = int((-subscription.angle_min+np.pi/2)/subscription.angle_increment)
-            upperBound = int((-subscription.angle_min+np.pi/6)/subscription.angle_increment)
+            upperBound = int((-subscription.angle_min+np.pi/2)/subscription.angle_increment)
+            lowerBound = int((-subscription.angle_min-np.pi/100)/subscription.angle_increment)
         sliced_scan= [[subscription.angle_min+i*subscription.angle_increment, subscription.ranges[i]] for i in range(lowerBound, upperBound)] 
         # sliced scan a list of coordinates in angle, distance form
         position_sliced_scan=np.array([[sliced_scan[i][1]*np.cos(sliced_scan[i][0]),sliced_scan[i][1]*np.sin(sliced_scan[i][0])] for i in range(len(sliced_scan))])
