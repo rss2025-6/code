@@ -18,7 +18,7 @@ class LinePublisher(Node):
 
         
         # the topics to publish and subscribe to
-    WALL_TOPIC = "/wall"
+    WALL_TOPIC = "/wall2"
 
     def __init__(self):
         super().__init__('line_publisher')

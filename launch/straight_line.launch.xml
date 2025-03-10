@@ -1,0 +1,9 @@
+<launch>
+  <!-- Launch the wall follower with parameters -->
+  <node pkg="wall_follower" name="straight_line" exec="straight_line" output="screen">
+    <!-- <param from="$(find-pkgshare wall_follower)/params.yaml"/> -->
+  </node>
+  
+  <!-- Launch the safety controller -->
+  <node pkg="wall_follower" name="safety" exec="safety2" output="screen"/>
+</launch>

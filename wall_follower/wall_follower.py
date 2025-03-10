@@ -7,7 +7,7 @@ from ackermann_msgs.msg import AckermannDriveStamped
 from visualization_msgs.msg import Marker
 from rcl_interfaces.msg import SetParametersResult
 from wall_follower.visualization_tools import VisualizationTools
-
+from std_msgs.msg import Float32
 
 class WallFollower(Node):
 
@@ -15,11 +15,16 @@ class WallFollower(Node):
         super().__init__("wall_follower")
         # Declare parameters to make them available for use
         # DO NOT MODIFY THIS! 
-        self.declare_parameter("scan_topic", "default")
-        self.declare_parameter("drive_topic", "default")
-        self.declare_parameter("side", "default")
-        self.declare_parameter("velocity", "default")
-        self.declare_parameter("desired_distance", "default")
+        self.declare_parameter("scan_topic", "/scan")
+        self.declare_parameter("drive_topic", "vesc/high_level/input/nav_1")
+        self.declare_parameter("side", -1)
+        self.declare_parameter("velocity", 1.)
+        self.declare_parameter("desired_distance", 1.)
+
+        self.declare_parameter("Kp", 2.0) #2.0
+        self.declare_parameter("Ki", 0.0)
+        self.declare_parameter("Kd", 1.5) #0.7
+
 
         # Fetch constants from the ROS parameter server
         # DO NOT MODIFY THIS! This is necessary for the tests to be able to test varying parameters!
@@ -28,15 +33,23 @@ class WallFollower(Node):
         self.SIDE = self.get_parameter('side').get_parameter_value().integer_value
         self.VELOCITY = self.get_parameter('velocity').get_parameter_value().double_value
         self.DESIRED_DISTANCE = self.get_parameter('desired_distance').get_parameter_value().double_value
-		
+        self.KP = self.get_parameter('Kp').get_parameter_value().double_value
+        self.KI = self.get_parameter('Ki').get_parameter_value().double_value
+        self.KD = self.get_parameter('Kd').get_parameter_value().double_value
         # This activates the parameters_callback function so that the tests are able
         # to change the parameters during testing.
         # DO NOT MODIFY THIS! 
         self.add_on_set_parameters_callback(self.parameters_callback)
 
+        self.get_logger().info(f"KP = {self.KP}")
+        self.get_logger().info(f"KD = {self.KD}")
         # TODO: Initialize your publishers and subscribers here
         self.simple_publisher = self.create_publisher(AckermannDriveStamped, self.DRIVE_TOPIC, 10)
-        self.line = self.create_publisher(Marker, "wall", 10)
+
+        self.error_publisher = self.create_publisher(Float32, "error", 10)
+
+        self.line = self.create_publisher(Marker, "follower_wall", 10)
+        self.linefit=self.create_publisher(Marker, "follower_wallfit", 10)
         timer_period = 1
         self.i =0
         self.subscription = self.create_subscription(
@@ -46,7 +59,12 @@ class WallFollower(Node):
             10)
         self.angle = 0.0
         self.distance = 0.0
+        self.last_error = 0 #cj added mar 8
         self.timer = self.create_timer(timer_period, self.timer_callback)
+
+        self.prev_time = self.get_clock().now().to_msg().nanosec
+
+        self.total_error = 0.
 
         # TODO: Write your callback functions here  
         # 
@@ -57,26 +75,76 @@ class WallFollower(Node):
     def listener_callback(self, msg):
         # self.get_logger().info("Message got")
         self.angle, self.distance = self.leastsq_wall(self.scan_slice_cartesian(msg))
-        self.angle += self.SIDE * (self.distance - self.DESIRED_DISTANCE)/self.DESIRED_DISTANCE * 1.5
 
+        # get the current error
+        current_error = self.distance-self.DESIRED_DISTANCE
+
+        # calculate dt for derivative control
+        dt = self.get_clock().now().to_msg().nanosec - self.prev_time
+        self.prev_time = self.get_clock().now().to_msg().nanosec
+
+        # publish current error for plotting
+        error_msg = Float32()
+        error_msg.data = current_error
+        self.error_publisher.publish(error_msg)
+
+        # calculate our control signal based on Kp * error + Kd * d/dt(error)
+        control_signal = self.KP*current_error + self.KD*(current_error/dt)
+        self.angle = self.SIDE * control_signal
+
+        # create drive command
         driveCommand = AckermannDriveStamped()
         driveCommand.header.frame_id = "base_link"
         driveCommand.header.stamp = self.get_clock().now().to_msg()
         driveCommand.drive.steering_angle= self.angle
-        # driveCommand.drive.acceleration= 0
-        # driveCommand.drive.jerk= 0
         driveCommand.drive.speed= self.VELOCITY
-        # driveCommand.drive.steering_angle_velocity= 0
+        
+        # publish drive command
         self.simple_publisher.publish(driveCommand)
 
+        # save time to calculate dt
+        #self.prev_time = self.get_clock().now().to_msg().nanosec
+
     def scan_slice_cartesian(self, subscription):
+        ranges = np.array(subscription.ranges)
+        angle_min, angle_max, angle_inc = subscription.angle_min, subscription.angle_max, subscription.angle_increment
+        angles = np.arange(angle_min, angle_max, angle_inc)
+
         if self.SIDE == -1:
-            lowerBound = int((-subscription.angle_min-np.pi/2)/subscription.angle_increment)
-            upperBound = int((-subscription.angle_min+np.pi/100)/subscription.angle_increment)
+            angle_min_filter, angle_max_filter = np.pi / 20, -np.pi / 2
+            valid_indices = (angles >= angle_max_filter) & (angles <= angle_min_filter)
+            valid_index_values = np.where(valid_indices)[0]
+            lowerBound = valid_index_values[0]
+            upperBound = valid_index_values[-1]
+            #lowerBound = int((-subscription.angle_min-np.pi/2)/subscription.angle_increment)
+            #upperBound = int((-subscription.angle_min+np.pi/12)/subscription.angle_increment)
+            #lowerBound = int((-np.pi/8)/subscription.angle_increment)
+            #upperBound = int((np.pi/6)/subscription.angle_increment)
         else:
-            upperBound = int((-subscription.angle_min+np.pi/2)/subscription.angle_increment)
-            lowerBound = int((-subscription.angle_min-np.pi/100)/subscription.angle_increment)
-        sliced_scan= [[subscription.angle_min+i*subscription.angle_increment, subscription.ranges[i]] for i in range(lowerBound, upperBound)] 
+            angle_min_filter, angle_max_filter = -np.pi / 20, np.pi / 2 #-np.pi / 20, 3*np.pi / 4
+            valid_indices = (angles >= angle_min_filter) & (angles <= angle_max_filter)
+            valid_index_values = np.where(valid_indices)[0]
+            lowerBound = valid_index_values[0]
+            upperBound = valid_index_values[-1]
+            #upperBound = int((-subscription.angle_min+np.pi/2)/subscription.angle_increment)
+            #lowerBound = int((-subscription.angle_min-np.pi/12)/subscription.angle_increment)
+        #distance_threshold = np.percentile(ranges[valid_indices], 50)
+        #self.get_logger().info(f"distance_threhold={distance_threshold}")
+
+        distance_threshold = np.percentile(ranges[valid_indices], 50)
+
+        #open_space = distance_large > 3
+
+        #if (open_space):
+        #    distance_threshold = np.percentile(ranges[valid_indices], 10)
+        #else:
+        #     distance_threshold = np.percentile(ranges[valid_indices], 50)
+        self.get_logger().info(f"distance_threhold={distance_threshold}")
+        #self.get_logger().info(f"Open space = {distance_large}")
+        num_samples = min(20, len(ranges[valid_indices]))  # Limit number of points
+        indices = np.linspace(lowerBound, upperBound, num_samples, dtype=int)
+        sliced_scan= [[angles[i], min(2.0,ranges[i])] for i in indices if ranges[i] <= distance_threshold] 
+        #sliced_scan= [[subscription.angle_min+i*subscription.angle_increment, subscription.ranges[i]] for i in range(lowerBound, upperBound)] 
         # sliced scan a list of coordinates in angle, distance form
         position_sliced_scan=np.array([[sliced_scan[i][1]*np.cos(sliced_scan[i][0]),sliced_scan[i][1]*np.sin(sliced_scan[i][0])] for i in range(len(sliced_scan))])
         return position_sliced_scan
@@ -89,8 +157,8 @@ class WallFollower(Node):
         s,r=np.linalg.lstsq(np.vstack([x, np.ones(len(x))]).T, y)[0] # slope, residue helpp
         angle=np.arctan(s) #assuming right side for now
 
-        VisualizationTools.plot_line([0.0, 1.0], [r, s+r], self.line)
-
+        VisualizationTools.plot_line(x, y, self.line, frame="/laser")
+        VisualizationTools.plot_line([0.,1.],[r,s+r], self.linefit, frame="/laser")
 
         return [angle, self.distance_to_line(s,r)]
 
